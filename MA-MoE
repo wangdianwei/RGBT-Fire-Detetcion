@@ -15,9 +15,6 @@ class Expert(nn.Module):
         return self.net(x) + self.residual_conv(x)
 
 
-# -------------------------
-# Modality Aware MoE
-# -------------------------
 class ModalityAwareMoE(nn.Module):
     def __init__(self, in_channels, num_experts=4, top_k=2):
         super().__init__()
@@ -25,10 +22,10 @@ class ModalityAwareMoE(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
 
-        # 专家网络
+
         self.experts = nn.ModuleList([Expert(in_channels) for _ in range(num_experts)])
 
-        # Gate 网络，输入 2C（RGB + IR 融合）
+    
         self.gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
@@ -37,30 +34,27 @@ class ModalityAwareMoE(nn.Module):
             nn.Linear(in_channels, num_experts)
         )
 
-        # 可学习模态权重
+
         self.modality_alpha = nn.Parameter(torch.tensor(0.6))
         self.modality_beta  = nn.Parameter(torch.tensor(0.4))
 
-        # 初始化为空，避免 deepcopy EMA 报错
+
         self.saved_outputs = None
 
     def forward(self, x_rgb, x_ir=None, return_gate=False):
-        # 兼容 tuple 输入（来自 CrossModalDCN）
         if isinstance(x_rgb, (list, tuple)):
             x_rgb, x_ir = x_rgb
 
         if x_ir is None:
             x_ir = torch.zeros_like(x_rgb)
 
-        # 双模态加权融合，用于 gate
         x_fuse = torch.cat([self.modality_alpha * x_rgb,
                             self.modality_beta  * x_ir], dim=1)
 
-        # Gate
+     
         gate_logits = self.gate(x_fuse)
         gate_scores = F.softmax(gate_logits, dim=1)
 
-        # Top-k mask
         topk_scores, topk_indices = torch.topk(gate_scores, self.top_k, dim=1)
         mask = torch.zeros_like(gate_scores)
         for b in range(gate_scores.size(0)):
@@ -68,14 +62,13 @@ class ModalityAwareMoE(nn.Module):
         mask = mask * gate_scores
         mask = mask.view(gate_scores.size(0), self.num_experts, 1, 1, 1)
 
-        # 专家输出
         x_input = self.modality_alpha * x_rgb + self.modality_beta * x_ir
         expert_outputs = torch.stack([expert(x_input) for expert in self.experts], dim=1)
 
-        # 聚合 Top-k
+    
         out = (expert_outputs * mask).sum(dim=1)
 
-        # 缓存，用于辅助 loss
+     
         self.saved_outputs = {
             "gate_scores": gate_scores.detach().clone(),
             "f_rgb": x_rgb.detach().clone(),
@@ -88,9 +81,6 @@ class ModalityAwareMoE(nn.Module):
             return out
 
 
-# -------------------------
-# 辅助 loss
-# -------------------------
 def routing_entropy_loss(gate_scores):
     ent = - (gate_scores * (gate_scores + 1e-12).log()).sum(dim=1).mean()
     return ent
